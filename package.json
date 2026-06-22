@@ -1,0 +1,11 @@
+{
+  "name": "weavin-ga4-report-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Google Analytics 4 (GA4) report runner: reads GA_ACCESS_TOKEN env + a GA4 property id and prints a GA4 Data API runReport to stdout.",
+  "main": "index.js",
+  "scripts": {
+    "report": "node index.js"
+  },
+  "engines": { "node": ">=18" }
+}
