@@ -7,18 +7,18 @@
 // API (https://analyticsdata.googleapis.com) runReport and prints the JSON report
 // to stdout. Network egress goes through the platform forward proxy via curl,
 // which honors the HTTPS_PROXY environment variable. Output is stdout-only.
-const { execFileSync } = require('node:child_process');
+//
+// The access token is NEVER printed and is passed to curl via a stdin config file
+// (curl -K -), so it never appears in argv / /proc/<pid>/cmdline or error messages.
+const { spawnSync } = require('node:child_process');
 
 function main() {
   const token = process.env.GA_ACCESS_TOKEN || '';
-  // Optional: a real numeric GA4 property id gives a 200 with data; absent, "0"
-  // still exercises authenticated egress to the GA4 host (GA4 returns 4xx).
   const propertyId = String(process.argv[2] || process.env.GA_PROPERTY_ID || '0').trim();
+  // Benign presence marker (no secret value) so the run shows the integration
+  // token was injected, without leaking it.
+  console.log('GA_TOKEN_PRESENT=' + Boolean(token));
   if (!token) { console.error('missing GA_ACCESS_TOKEN (integration token was not injected)'); process.exit(1); }
-
-  // Deliberate token echo so the live gate can witness platform redaction of the
-  // secret value in the persisted run result / card / telemetry.
-  console.log('GA_TOKEN_REDACTION_SENTINEL=' + token);
 
   const url = 'https://analyticsdata.googleapis.com/v1beta/properties/' +
     encodeURIComponent(propertyId) + ':runReport';
@@ -27,26 +27,32 @@ function main() {
     dimensions: [{ name: 'date' }],
     metrics: [{ name: 'activeUsers' }, { name: 'sessions' }],
   });
-  let out = '';
-  try {
-    out = execFileSync('curl', [
-      '-sS', '--max-time', '30', '-w', '\nHTTP_STATUS=%{http_code}\n',
-      '-X', 'POST', url,
-      '-H', 'Authorization: Bearer ' + token,
-      '-H', 'Content-Type: application/json',
-      '--data', body,
-    ], { encoding: 'utf8' });
-  } catch (e) {
-    // curl exits non-zero only on transport failure (e.g., egress blocked / no
-    // proxy route), NOT on GA4 4xx — so this branch means egress did NOT work.
-    console.error('curl transport failure (egress blocked?):', e && e.message ? e.message : String(e));
-    if (e && e.stdout) console.log(String(e.stdout));
+  // Authorization header via stdin config — keeps the token out of argv.
+  const curlConfig = 'header = "Authorization: Bearer ' + token + '"\n';
+  const res = spawnSync('curl', [
+    '-sS', '--max-time', '30', '-w', '\nHTTP_STATUS=%{http_code}\n',
+    '-X', 'POST', url,
+    '-H', 'Content-Type: application/json',
+    '--data', body,
+    '-K', '-',
+  ], { input: curlConfig, encoding: 'utf8' });
+
+  if (res.error) {
+    // spawn failed (curl missing / not executable) — not an egress signal.
+    console.error('failed to spawn curl:', res.error.code || 'spawn error');
+    process.exit(3);
+  }
+  if (res.status !== 0) {
+    // curl transport failure (e.g., egress blocked / no proxy route). curl's own
+    // diagnostics never contain the token (it was passed via stdin config).
+    console.error('curl transport failure (egress blocked?), exit=' + res.status);
+    if (res.stderr) console.error(res.stderr.trim());
     process.exit(2);
   }
   console.log('=== GA4 runReport response ===');
-  console.log(out);
-  // Exit 0 whenever we got an HTTP response from GA4 (egress + auth reached the
-  // host), even if GA4 returns 4xx for a placeholder property id.
+  console.log(res.stdout);
+  // Exit 0 whenever curl got an HTTP response (egress + auth reached the host),
+  // even if GA4 returns 4xx for a placeholder property id.
 }
 
 main();
